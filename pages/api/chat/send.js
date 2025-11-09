@@ -1,6 +1,5 @@
-// pages/api/chat/send.js
 import OpenAI from 'openai';
-import { pool } from '../../../lib/db';
+import pool from '../../../lib/db';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -34,9 +33,9 @@ export default async function handler(req, res) {
       [sessionId, 'assistant', reply]
     );
 
-    res.status(200).json({ reply });
+    return res.status(200).json({ reply });
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: 'server_error', detail: e.message });
+    console.error('chat_send_error:', e);
+    return res.status(500).json({ error: 'server_error', detail: e.message });
   }
 }
