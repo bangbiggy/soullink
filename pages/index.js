@@ -1,3 +1,4 @@
+// pages/index.js
 import { useEffect, useRef, useState } from 'react';
 
 const LS_KEY = 'soullink_session_id';
@@ -8,6 +9,11 @@ export default function Home() {
   const [reply, setReply] = useState('');
   const [err, setErr] = useState('');
   const [msgs, setMsgs] = useState([]);
+
+  // NEW: personas
+  const [personas, setPersonas] = useState([]);
+  const [selectedPersona, setSelectedPersona] = useState('');
+
   const listRef = useRef(null);
 
   const scrollToBottom = () => {
@@ -20,7 +26,7 @@ export default function Home() {
     if (r.ok) setMsgs(j.messages || []);
   };
 
-  // 🔹 Restore session on first load
+  // Restore session on first load
   useEffect(() => {
     const saved = typeof window !== 'undefined' ? localStorage.getItem(LS_KEY) : '';
     if (saved) {
@@ -29,20 +35,29 @@ export default function Home() {
     }
   }, []);
 
-  // 🔹 When session changes, save to localStorage & fetch messages
+  // Load personas once
+  useEffect(() => {
+    fetch('/api/characters/list')
+      .then(r => r.json())
+      .then(j => setPersonas(j.characters || []))
+      .catch(() => {});
+  }, []);
+
+  // Save session + refresh messages when session changes
   useEffect(() => {
     if (!sessionId) return;
     localStorage.setItem(LS_KEY, sessionId);
     loadMessages(sessionId).then(scrollToBottom);
   }, [sessionId]);
 
+  // Create session (NOW sends characterId)
   const makeSession = async () => {
     setErr('');
     try {
       const r = await fetch('/api/session/create', {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({})
+        body: JSON.stringify({ characterId: selectedPersona || null })
       });
       const j = await r.json();
       if (!r.ok) throw new Error(j.detail || j.error || 'Failed to create session');
@@ -88,35 +103,55 @@ export default function Home() {
     <main className="min-h-screen bg-black text-white flex flex-col items-center p-6">
       <h1 className="text-4xl font-extrabold mb-4">SoulLink — MVP Chat</h1>
 
-      <div className="flex gap-3">
+      {/* Persona selector + buttons */}
+      <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center">
+        <select
+          value={selectedPersona}
+          onChange={e=>setSelectedPersona(e.target.value)}
+          className="px-3 py-2 rounded bg-white text-black"
+          title="Choose a persona for the next session"
+        >
+          <option value="">Default SoulLink</option>
+          {personas.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+
         <button onClick={makeSession} className="px-4 py-2 rounded bg-pink-500 hover:bg-pink-600">
-          {sessionId ? 'New Chat' : 'Create Session'}
+          {sessionId ? 'New Chat (use selected persona)' : 'Create Session'}
         </button>
+
         {sessionId && (
           <button onClick={clearSession} className="px-4 py-2 rounded bg-zinc-700 hover:bg-zinc-600">
             End Session
           </button>
         )}
+
+        <a href="/persona" className="text-sm opacity-80 hover:opacity-100 underline text-center sm:ml-2">
+          Manage Personas
+        </a>
       </div>
 
       <div className="text-sm opacity-80 mt-2">Session: {sessionId || '—'}</div>
 
       {/* CHAT AREA */}
       <div className="w-full max-w-2xl mt-6 rounded border border-white/10 bg-white/5 flex flex-col">
+        {/* messages list */}
         <div ref={listRef} className="h-[50vh] overflow-y-auto p-4 space-y-3 relative z-0">
           {msgs.map(m => (
             <div key={m.id || m.created_at} className={m.role === 'user' ? 'text-right' : 'text-left'}>
-              <div className={`inline-block px-3 py-2 rounded ${m.role === 'user' ? 'bg-indigo-600' : 'bg-zinc-700'}`}>
+              <div className={`inline-block px-3 py-2 rounded ${
+                m.role === 'user' ? 'bg-indigo-600' : 'bg-zinc-700'
+              }`}>
                 <span className="text-sm opacity-70 mr-2">{m.role === 'user' ? 'You' : 'SoulLink'}:</span>
                 {m.text}
               </div>
             </div>
           ))}
           {!msgs.length && sessionId && (
-            <div className="text-center text-white/50 text-sm">Start the conversation…</div>
+            <div className="text-center text-white/60 text-sm">Start the conversation…</div>
           )}
         </div>
 
+        {/* input row */}
         <div className="flex gap-2 p-3 border-t border-white/10 bg-black/60 sticky bottom-0 z-10">
           <input
             value={text}
