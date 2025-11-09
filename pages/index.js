@@ -1,7 +1,8 @@
 // pages/index.js
 import { useEffect, useRef, useState } from 'react';
 
-const LS_KEY = 'soullink_session_id';
+const LS_SESSION = 'soullink_session_id';
+const LS_CHARACTER = 'soullink_character_id';
 
 export default function Home() {
   const [sessionId, setSessionId] = useState('');
@@ -10,9 +11,9 @@ export default function Home() {
   const [err, setErr] = useState('');
   const [msgs, setMsgs] = useState([]);
 
-  // NEW: personas
   const [personas, setPersonas] = useState([]);
-  const [selectedPersona, setSelectedPersona] = useState('');
+  const [selectedPersona, setSelectedPersona] = useState(''); // id
+  const [personaMeta, setPersonaMeta] = useState(null); // {id,name,avatar_url,...}
 
   const listRef = useRef(null);
 
@@ -26,31 +27,51 @@ export default function Home() {
     if (r.ok) setMsgs(j.messages || []);
   };
 
-  // Restore session on first load
+  const pickPersonaMeta = (id) => {
+    if (!id) return setPersonaMeta(null);
+    const p = personas.find(x => x.id === id) || null;
+    setPersonaMeta(p);
+  };
+
+  // restore session + selected persona
   useEffect(() => {
-    const saved = typeof window !== 'undefined' ? localStorage.getItem(LS_KEY) : '';
-    if (saved) {
-      setSessionId(saved);
-      loadMessages(saved).then(scrollToBottom);
+    const savedSession = typeof window !== 'undefined' ? localStorage.getItem(LS_SESSION) : '';
+    const savedChar = typeof window !== 'undefined' ? localStorage.getItem(LS_CHARACTER) : '';
+    if (savedChar) setSelectedPersona(savedChar);
+    fetch('/api/characters/list')
+      .then(r => r.json())
+      .then(j => {
+        setPersonas(j.characters || []);
+        if (savedChar) {
+          const found = (j.characters || []).find(c => c.id === savedChar);
+          if (found) setPersonaMeta(found);
+        }
+      })
+      .catch(()=>{});
+
+    if (savedSession) {
+      setSessionId(savedSession);
+      loadMessages(savedSession).then(scrollToBottom);
     }
   }, []);
 
-  // Load personas once
-  useEffect(() => {
-    fetch('/api/characters/list')
-      .then(r => r.json())
-      .then(j => setPersonas(j.characters || []))
-      .catch(() => {});
-  }, []);
-
-  // Save session + refresh messages when session changes
+  // save session changes
   useEffect(() => {
     if (!sessionId) return;
-    localStorage.setItem(LS_KEY, sessionId);
+    localStorage.setItem(LS_SESSION, sessionId);
     loadMessages(sessionId).then(scrollToBottom);
   }, [sessionId]);
 
-  // Create session (NOW sends characterId)
+  // save persona selection
+  useEffect(() => {
+    if (selectedPersona) {
+      localStorage.setItem(LS_CHARACTER, selectedPersona);
+    } else {
+      localStorage.removeItem(LS_CHARACTER);
+    }
+    pickPersonaMeta(selectedPersona);
+  }, [selectedPersona, personas]);
+
   const makeSession = async () => {
     setErr('');
     try {
@@ -61,14 +82,24 @@ export default function Home() {
       });
       const j = await r.json();
       if (!r.ok) throw new Error(j.detail || j.error || 'Failed to create session');
+
       setSessionId(j.sessionId);
       setMsgs([]);
       setReply('');
+
+      // auto-greet
+      await fetch('/api/session/greet', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ sessionId: j.sessionId })
+      });
+      await loadMessages(j.sessionId);
+      scrollToBottom();
     } catch (e) { setErr(String(e.message || e)); }
   };
 
   const clearSession = () => {
-    localStorage.removeItem(LS_KEY);
+    localStorage.removeItem(LS_SESSION);
     setSessionId('');
     setMsgs([]);
     setText('');
@@ -79,7 +110,6 @@ export default function Home() {
     if (!text || !sessionId) return;
     setErr('');
 
-    // optimistic render
     const localUser = { id: crypto.randomUUID(), role:'user', text, created_at: new Date().toISOString() };
     setMsgs(prev => [...prev, localUser]);
     setText('');
@@ -97,6 +127,14 @@ export default function Home() {
       await loadMessages(sessionId);
       scrollToBottom();
     } catch (e) { setErr(String(e.message || e)); }
+  };
+
+  // tiny helper: avatar for assistant bubble
+  const AssistantAvatar = () => {
+    const url = personaMeta?.avatar_url;
+    const name = personaMeta?.name || 'S';
+    if (url) return <img src={url} alt={name} className="w-8 h-8 rounded-full object-cover border border-white/10" />;
+    return <div className="w-8 h-8 rounded-full bg-pink-600 grid place-items-center text-xs">{(name[0]||'S').toUpperCase()}</div>;
   };
 
   return (
@@ -132,16 +170,44 @@ export default function Home() {
 
       <div className="text-sm opacity-80 mt-2">Session: {sessionId || '—'}</div>
 
+      {/* Persona header */}
+      <div className="w-full max-w-2xl mt-4 p-4 rounded bg-white/5 border border-white/10 flex items-center gap-3">
+        {personaMeta ? (
+          <>
+            {personaMeta.avatar_url
+              ? <img src={personaMeta.avatar_url} alt={personaMeta.name} className="w-12 h-12 rounded-full object-cover border border-white/10" />
+              : <div className="w-12 h-12 rounded-full bg-pink-600 grid place-items-center text-lg">{(personaMeta.name[0]||'S').toUpperCase()}</div>}
+            <div className="leading-tight">
+              <div className="font-semibold">{personaMeta.name}</div>
+              <div className="text-xs text-white/60 line-clamp-1">{personaMeta.bio || 'SoulLink persona'}</div>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="w-12 h-12 rounded-full bg-pink-600 grid place-items-center text-lg">S</div>
+            <div className="leading-tight">
+              <div className="font-semibold">SoulLink</div>
+              <div className="text-xs text-white/60">Default companion</div>
+            </div>
+          </>
+        )}
+      </div>
+
       {/* CHAT AREA */}
-      <div className="w-full max-w-2xl mt-6 rounded border border-white/10 bg-white/5 flex flex-col">
+      <div className="w-full max-w-2xl mt-4 rounded border border-white/10 bg-white/5 flex flex-col">
         {/* messages list */}
         <div ref={listRef} className="h-[50vh] overflow-y-auto p-4 space-y-3 relative z-0">
           {msgs.map(m => (
-            <div key={m.id || m.created_at} className={m.role === 'user' ? 'text-right' : 'text-left'}>
-              <div className={`inline-block px-3 py-2 rounded ${
+            <div key={m.id || m.created_at} className={m.role === 'user' ? 'flex justify-end' : 'flex justify-start'}>
+              {m.role === 'assistant' && (
+                <div className="mr-2 self-end">
+                  <AssistantAvatar />
+                </div>
+              )}
+              <div className={`max-w-[80%] px-3 py-2 rounded ${
                 m.role === 'user' ? 'bg-indigo-600' : 'bg-zinc-700'
               }`}>
-                <span className="text-sm opacity-70 mr-2">{m.role === 'user' ? 'You' : 'SoulLink'}:</span>
+                <span className="text-sm opacity-70 mr-2">{m.role === 'user' ? 'You' : (personaMeta?.name || 'SoulLink')}:</span>
                 {m.text}
               </div>
             </div>
