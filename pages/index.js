@@ -1,244 +1,424 @@
 // pages/index.js
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
 
-const LS_SESSION = 'soullink_session_id';
-const LS_CHARACTER = 'soullink_character_id';
+function PersonaAvatar({ src, name = 'SoulLink', size = 32 }) {
+  const initials = useMemo(() => {
+    const s = (name || '').trim();
+    if (!s) return 'S';
+    return s
+      .split(/\s+/)
+      .map((w) => (w[0] || '').toUpperCase())
+      .join('')
+      .slice(0, 2) || 'S';
+  }, [name]);
+
+  const baseStyle = {
+    width: size,
+    height: size,
+    borderRadius: '50%',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: '#ff2d6b',
+    color: 'white',
+    fontWeight: 700,
+    fontSize: Math.max(12, Math.floor(size * 0.42)),
+    overflow: 'hidden',
+    flex: '0 0 auto',
+  };
+
+  if (src && /^https?:\/\//i.test(src)) {
+    return (
+      <img
+        src={src}
+        alt={name || 'avatar'}
+        width={size}
+        height={size}
+        style={{ ...baseStyle, objectFit: 'cover' }}
+        onError={(e) => {
+          // Hide broken image and show fallback
+          e.currentTarget.style.display = 'none';
+          const fallback = document.createElement('div');
+          Object.assign(fallback.style, baseStyle);
+          fallback.textContent = initials;
+          e.currentTarget.parentElement?.appendChild(fallback);
+        }}
+      />
+    );
+  }
+
+  return (
+    <div style={baseStyle} aria-label={name}>
+      {initials}
+    </div>
+  );
+}
 
 export default function Home() {
-  const [sessionId, setSessionId] = useState('');
-  const [text, setText] = useState('');
-  const [reply, setReply] = useState('');
-  const [err, setErr] = useState('');
-  const [msgs, setMsgs] = useState([]);
-
   const [personas, setPersonas] = useState([]);
-  const [selectedPersona, setSelectedPersona] = useState(''); // id
-  const [personaMeta, setPersonaMeta] = useState(null); // {id,name,avatar_url,...}
+  const [selectedCharacterId, setSelectedCharacterId] = useState('');
+  const [sessionId, setSessionId] = useState('');
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState('');
+  const [creatingSession, setCreatingSession] = useState(false);
+  const [sending, setSending] = useState(false);
+
+  const selectedPersona = useMemo(
+    () => personas.find((p) => p.id === selectedCharacterId),
+    [personas, selectedCharacterId]
+  );
 
   const listRef = useRef(null);
 
-  const scrollToBottom = () => {
-    if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
-  };
-
-  const loadMessages = async (sid) => {
-    const r = await fetch(`/api/messages/list?sessionId=${sid}`);
-    const j = await r.json();
-    if (r.ok) setMsgs(j.messages || []);
-  };
-
-  const pickPersonaMeta = (id) => {
-    if (!id) return setPersonaMeta(null);
-    const p = personas.find(x => x.id === id) || null;
-    setPersonaMeta(p);
-  };
-
-  // restore session + selected persona
+  // Auto-scroll chat to the bottom on message updates
   useEffect(() => {
-    const savedSession = typeof window !== 'undefined' ? localStorage.getItem(LS_SESSION) : '';
-    const savedChar = typeof window !== 'undefined' ? localStorage.getItem(LS_CHARACTER) : '';
-    if (savedChar) setSelectedPersona(savedChar);
-    fetch('/api/characters/list')
-      .then(r => r.json())
-      .then(j => {
-        setPersonas(j.characters || []);
-        if (savedChar) {
-          const found = (j.characters || []).find(c => c.id === savedChar);
-          if (found) setPersonaMeta(found);
-        }
-      })
-      .catch(()=>{});
-
-    if (savedSession) {
-      setSessionId(savedSession);
-      loadMessages(savedSession).then(scrollToBottom);
+    if (listRef.current) {
+      listRef.current.scrollTop = listRef.current.scrollHeight;
     }
+  }, [messages]);
+
+  // Load personas on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/api/characters/list');
+        const data = await res.json();
+        const items = data?.characters || data?.items || [];
+        setPersonas(items);
+
+        // restore selection
+        const saved = typeof window !== 'undefined' && localStorage.getItem('personaId');
+        if (saved && items.some((p) => p.id === saved)) {
+          setSelectedCharacterId(saved);
+        } else if (items.length) {
+          setSelectedCharacterId(items[0].id);
+        }
+      } catch (e) {
+        console.error('Failed to load personas', e);
+      }
+    })();
   }, []);
 
-  // save session changes
+  // Persist persona selection
   useEffect(() => {
-    if (!sessionId) return;
-    localStorage.setItem(LS_SESSION, sessionId);
-    loadMessages(sessionId).then(scrollToBottom);
-  }, [sessionId]);
+    if (typeof window === 'undefined') return;
+    if (selectedCharacterId) localStorage.setItem('personaId', selectedCharacterId);
+  }, [selectedCharacterId]);
 
-  // save persona selection
-  useEffect(() => {
-    if (selectedPersona) {
-      localStorage.setItem(LS_CHARACTER, selectedPersona);
-    } else {
-      localStorage.removeItem(LS_CHARACTER);
-    }
-    pickPersonaMeta(selectedPersona);
-  }, [selectedPersona, personas]);
-
-  const makeSession = async () => {
-    setErr('');
+  async function createSession() {
+    if (!selectedCharacterId) return;
+    setCreatingSession(true);
     try {
-      const r = await fetch('/api/session/create', {
+      const res = await fetch('/api/session/create', {
         method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ characterId: selectedPersona || null })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ characterId: selectedCharacterId }),
       });
-      const j = await r.json();
-      if (!r.ok) throw new Error(j.detail || j.error || 'Failed to create session');
+      const data = await res.json();
+      // Normalized possible keys: sessionId | id | session_id
+      const sid = data.sessionId || data.id || data.session_id;
+      if (sid) {
+        setSessionId(sid);
+        setMessages([]); // fresh chat
+      } else {
+        console.error('No session id from /api/session/create', data);
+      }
+    } catch (e) {
+      console.error('Create session failed', e);
+    } finally {
+      setCreatingSession(false);
+    }
+  }
 
-      setSessionId(j.sessionId);
-      setMsgs([]);
-      setReply('');
-
-      // auto-greet
-      await fetch('/api/session/greet', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ sessionId: j.sessionId })
-      });
-      await loadMessages(j.sessionId);
-      scrollToBottom();
-    } catch (e) { setErr(String(e.message || e)); }
-  };
-
-  const clearSession = () => {
-    localStorage.removeItem(LS_SESSION);
+  function endSession() {
     setSessionId('');
-    setMsgs([]);
-    setText('');
-    setReply('');
-  };
+    setMessages([]);
+  }
 
-  const send = async () => {
-    if (!text || !sessionId) return;
-    setErr('');
-
-    const localUser = { id: crypto.randomUUID(), role:'user', text, created_at: new Date().toISOString() };
-    setMsgs(prev => [...prev, localUser]);
-    setText('');
-    scrollToBottom();
-
+  async function sendMessage() {
+    if (!sessionId || !input.trim()) return;
+    const text = input.trim();
+    setInput('');
+    // Optimistic user message
+    setMessages((m) => [...m, { role: 'user', content: text }]);
+    setSending(true);
     try {
-      const r = await fetch('/api/chat/send', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ sessionId, userText: localUser.text })
+      const res = await fetch('/api/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, message: text }),
       });
-      const j = await r.json();
-      if (!r.ok) throw new Error(j.detail || j.error || 'Failed to send message');
-      setReply(j.reply || '');
-      await loadMessages(sessionId);
-      scrollToBottom();
-    } catch (e) { setErr(String(e.message || e)); }
-  };
+      const data = await res.json();
 
-  // tiny helper: avatar for assistant bubble
-  const AssistantAvatar = () => {
-    const url = personaMeta?.avatar_url;
-    const name = personaMeta?.name || 'S';
-    if (url) return <img src={url} alt={name} className="w-8 h-8 rounded-full object-cover border border-white/10" />;
-    return <div className="w-8 h-8 rounded-full bg-pink-600 grid place-items-center text-xs">{(name[0]||'S').toUpperCase()}</div>;
-  };
+      // Accept a few possible reply shapes
+      const reply =
+        data.reply ||
+        data.message ||
+        data.text ||
+        data.assistant ||
+        (Array.isArray(data.messages)
+          ? (data.messages.find((m) => m.role === 'assistant') || {}).content
+          : '');
+
+      if (reply) {
+        setMessages((m) => [...m, { role: 'assistant', content: reply }]);
+      } else if (Array.isArray(data.messages)) {
+        // Some endpoints return the entire transcript
+        const normalized = data.messages.map((m) => ({
+          role: m.role,
+          content: m.content || m.text || '',
+        }));
+        setMessages(normalized);
+      } else {
+        console.warn('No assistant reply field found.', data);
+      }
+    } catch (e) {
+      console.error('Send failed', e);
+      // Optional: show error bubble
+      setMessages((m) => [
+        ...m,
+        { role: 'assistant', content: "Hmm, I couldn't send that. Try again?" },
+      ]);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  function onKeyDown(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  }
 
   return (
-    <main className="min-h-screen bg-black text-white flex flex-col items-center p-6">
-      <h1 className="text-4xl font-extrabold mb-4">SoulLink — MVP Chat</h1>
+    <div style={{ minHeight: '100vh', background: '#000', color: '#fff' }}>
+      <div style={{ maxWidth: 900, margin: '0 auto', padding: '32px 20px' }}>
+        <h1 style={{ textAlign: 'center', fontSize: 40, fontWeight: 800, marginBottom: 16 }}>
+          SoulLink — MVP Chat
+        </h1>
 
-      {/* Persona selector + buttons */}
-      <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center">
-        <select
-          value={selectedPersona}
-          onChange={e=>setSelectedPersona(e.target.value)}
-          className="px-3 py-2 rounded bg-white text-black"
-          title="Choose a persona for the next session"
+        {/* Controls row */}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            justifyContent: 'center',
+            flexWrap: 'wrap',
+            marginBottom: 12,
+          }}
         >
-          <option value="">Default SoulLink</option>
-          {personas.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-        </select>
+          <select
+            value={selectedCharacterId}
+            onChange={(e) => setSelectedCharacterId(e.target.value)}
+            style={{
+              padding: '8px 10px',
+              background: '#111',
+              color: '#fff',
+              borderRadius: 6,
+              border: '1px solid #333',
+              minWidth: 220,
+            }}
+          >
+            {personas.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name || 'Unnamed Persona'}
+              </option>
+            ))}
+          </select>
 
-        <button onClick={makeSession} className="px-4 py-2 rounded bg-pink-500 hover:bg-pink-600">
-          {sessionId ? 'New Chat (use selected persona)' : 'Create Session'}
-        </button>
+          <button
+            onClick={createSession}
+            disabled={!selectedCharacterId || creatingSession}
+            style={{
+              padding: '10px 14px',
+              background: '#ff2d6b',
+              color: '#fff',
+              fontWeight: 700,
+              border: 'none',
+              borderRadius: 8,
+              cursor: 'pointer',
+              opacity: creatingSession ? 0.7 : 1,
+            }}
+          >
+            {creatingSession ? 'Creating…' : 'New Chat (use selected persona)'}
+          </button>
 
-        {sessionId && (
-          <button onClick={clearSession} className="px-4 py-2 rounded bg-zinc-700 hover:bg-zinc-600">
+          <button
+            onClick={endSession}
+            disabled={!sessionId}
+            style={{
+              padding: '10px 14px',
+              background: '#333',
+              color: '#fff',
+              fontWeight: 700,
+              border: 'none',
+              borderRadius: 8,
+              cursor: sessionId ? 'pointer' : 'not-allowed',
+              opacity: sessionId ? 1 : 0.6,
+            }}
+          >
             End Session
           </button>
-        )}
 
-        <a href="/persona" className="text-sm opacity-80 hover:opacity-100 underline text-center sm:ml-2">
-          Manage Personas
-        </a>
-      </div>
-
-      <div className="text-sm opacity-80 mt-2">Session: {sessionId || '—'}</div>
-
-      {/* Persona header */}
-      <div className="w-full max-w-2xl mt-4 p-4 rounded bg-white/5 border border-white/10 flex items-center gap-3">
-        {personaMeta ? (
-          <>
-            {personaMeta.avatar_url
-              ? <img src={personaMeta.avatar_url} alt={personaMeta.name} className="w-12 h-12 rounded-full object-cover border border-white/10" />
-              : <div className="w-12 h-12 rounded-full bg-pink-600 grid place-items-center text-lg">{(personaMeta.name[0]||'S').toUpperCase()}</div>}
-            <div className="leading-tight">
-              <div className="font-semibold">{personaMeta.name}</div>
-              <div className="text-xs text-white/60 line-clamp-1">{personaMeta.bio || 'SoulLink persona'}</div>
-            </div>
-          </>
-        ) : (
-          <>
-            <div className="w-12 h-12 rounded-full bg-pink-600 grid place-items-center text-lg">S</div>
-            <div className="leading-tight">
-              <div className="font-semibold">SoulLink</div>
-              <div className="text-xs text-white/60">Default companion</div>
-            </div>
-          </>
-        )}
-      </div>
-
-      {/* CHAT AREA */}
-      <div className="w-full max-w-2xl mt-4 rounded border border-white/10 bg-white/5 flex flex-col">
-        {/* messages list */}
-        <div ref={listRef} className="h-[50vh] overflow-y-auto p-4 space-y-3 relative z-0">
-          {msgs.map(m => (
-            <div key={m.id || m.created_at} className={m.role === 'user' ? 'flex justify-end' : 'flex justify-start'}>
-              {m.role === 'assistant' && (
-                <div className="mr-2 self-end">
-                  <AssistantAvatar />
-                </div>
-              )}
-              <div className={`max-w-[80%] px-3 py-2 rounded ${
-                m.role === 'user' ? 'bg-indigo-600' : 'bg-zinc-700'
-              }`}>
-                <span className="text-sm opacity-70 mr-2">{m.role === 'user' ? 'You' : (personaMeta?.name || 'SoulLink')}:</span>
-                {m.text}
-              </div>
-            </div>
-          ))}
-          {!msgs.length && sessionId && (
-            <div className="text-center text-white/60 text-sm">Start the conversation…</div>
-          )}
+          <Link
+            href="/persona"
+            style={{
+              marginLeft: 6,
+              color: '#9da3ff',
+              textDecoration: 'underline',
+              fontWeight: 600,
+            }}
+          >
+            Manage Personas
+          </Link>
         </div>
 
-        {/* input row */}
-        <div className="flex gap-2 p-3 border-t border-white/10 bg-black/60 sticky bottom-0 z-10">
-          <input
-            value={text}
-            onChange={e=>setText(e.target.value)}
+        {/* Session label */}
+        <div style={{ textAlign: 'center', opacity: 0.7, marginBottom: 14 }}>
+          Session: {sessionId || '—'}
+        </div>
+
+        {/* Persona header card */}
+        <div
+          style={{
+            background: '#0b0b0b',
+            border: '1px solid #222',
+            borderRadius: 10,
+            padding: 14,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            marginBottom: 12,
+          }}
+        >
+          <PersonaAvatar
+            src={selectedPersona?.avatar_url}
+            name={selectedPersona?.name || 'SoulLink'}
+            size={40}
+          />
+          <div>
+            <div style={{ fontWeight: 800, fontSize: 16 }}>
+              {selectedPersona?.name || 'SoulLink'}
+            </div>
+            <div style={{ opacity: 0.8, fontSize: 12 }}>
+              {selectedPersona?.bio || 'Default companion'}
+            </div>
+          </div>
+        </div>
+
+        {/* Chat area */}
+        <div
+          ref={listRef}
+          style={{
+            background: '#0b0b0b',
+            border: '1px solid #222',
+            borderRadius: 10,
+            height: 460,
+            overflowY: 'auto',
+            padding: 12,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 10,
+          }}
+        >
+          {messages.length === 0 && (
+            <div style={{ opacity: 0.6, textAlign: 'center', marginTop: 10 }}>
+              {sessionId ? 'Say hi…' : 'Create a session to start chatting.'}
+            </div>
+          )}
+
+          {messages.map((m, idx) => {
+            const isAssistant = m.role === 'assistant';
+            return (
+              <div
+                key={idx}
+                style={{
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: 10,
+                  flexDirection: isAssistant ? 'row' : 'row-reverse',
+                }}
+              >
+                {/* Avatar for assistant only */}
+                {isAssistant ? (
+                  <PersonaAvatar
+                    src={selectedPersona?.avatar_url}
+                    name={selectedPersona?.name || 'SoulLink'}
+                    size={28}
+                  />
+                ) : (
+                  <div style={{ width: 28 }} />
+                )}
+
+                <div
+                  style={{
+                    background: isAssistant ? '#1c1c1f' : '#2b2472',
+                    color: '#fff',
+                    borderRadius: 10,
+                    padding: '10px 12px',
+                    maxWidth: '78%',
+                    whiteSpace: 'pre-wrap',
+                    lineHeight: 1.45,
+                    border: '1px solid rgba(255,255,255,0.06)',
+                  }}
+                >
+                  <div style={{ opacity: 0.6, fontSize: 12, marginBottom: 4 }}>
+                    {isAssistant ? selectedPersona?.name || 'SoulLink' : 'You'}
+                  </div>
+                  <div>{m.content}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Composer */}
+        <div
+          style={{
+            marginTop: 12,
+            display: 'flex',
+            gap: 8,
+            alignItems: 'center',
+          }}
+        >
+          <textarea
             placeholder={sessionId ? 'Say hi…' : 'Create a session first'}
-            className="flex-1 px-3 py-2 rounded bg-white text-black border border-white/20 focus:outline-none focus:ring-2 focus:ring-pink-500"
-            onKeyDown={(e)=>{ if(e.key==='Enter' && sessionId && text) send(); }}
-            disabled={!sessionId}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={onKeyDown}
+            disabled={!sessionId || sending}
+            rows={1}
+            style={{
+              flex: 1,
+              padding: '12px 14px',
+              background: '#0b0b0b',
+              color: '#fff',
+              borderRadius: 10,
+              border: '1px solid #222',
+              resize: 'none',
+            }}
           />
           <button
-            onClick={send}
-            disabled={!sessionId || !text}
-            className="px-4 py-2 rounded bg-indigo-500 disabled:opacity-50"
+            onClick={sendMessage}
+            disabled={!sessionId || sending || !input.trim()}
+            style={{
+              padding: '10px 16px',
+              background: '#2b2472',
+              color: '#fff',
+              fontWeight: 700,
+              border: 'none',
+              borderRadius: 10,
+              cursor: !sessionId || sending || !input.trim() ? 'not-allowed' : 'pointer',
+              opacity: !sessionId || sending || !input.trim() ? 0.6 : 1,
+            }}
           >
-            Send
+            {sending ? 'Sending…' : 'Send'}
           </button>
         </div>
       </div>
-
-      {err && <div className="mt-3 text-red-400 text-sm">Error: {err}</div>}
-      {reply && <div className="mt-6 max-w-2xl text-lg">{reply}</div>}
-    </main>
+    </div>
   );
 }
